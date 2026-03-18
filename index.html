@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AR Hangout</title>
+  <title>AR Hangout — Cross-platform</title>
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -12,7 +12,7 @@
   <div id="landing">
     <div id="landing-card">
       <h1>AR Hangout</h1>
-      <p>Share a room code to meet in AR together</p>
+      <p>Meet in AR on Quest · 3D on desktop · works everywhere</p>
       <input id="room-input" type="text" maxlength="6" placeholder="Room code (e.g. SUNNY)" autocomplete="off" />
       <div id="landing-buttons">
         <button id="btn-create">Create Room</button>
@@ -54,10 +54,16 @@
   <!-- Three.js canvas target -->
   <canvas id="xr-canvas"></canvas>
 
-  <!-- Start AR button (shown after room is ready) -->
+  <!-- Start button (shown after room is ready; label set dynamically) -->
   <div id="ar-prompt" class="hidden">
-    <button id="btn-start-ar">Enter AR</button>
+    <button id="btn-start-ar" disabled>Detecting…</button>
     <p id="ar-status"></p>
+    <div id="desktop-hints" class="hint-row hidden">
+      <span>🖱 Drag to orbit</span>
+      <span>📜 Scroll to zoom</span>
+      <span>🖱 Click object to grab</span>
+      <span>⌨ Del to delete</span>
+    </div>
   </div>
 
   <script type="importmap">
@@ -70,5 +76,15 @@
   </script>
 
   <script type="module" src="js/app.js"></script>
+
+  <!-- Show desktop hints once btn-start-ar says "Enter 3D" -->
+  <script>
+    const _obs = new MutationObserver(() => {
+      const btn   = document.getElementById('btn-start-ar');
+      const hints = document.getElementById('desktop-hints');
+      if (btn && hints) hints.classList.toggle('hidden', btn.textContent !== 'Enter 3D');
+    });
+    _obs.observe(document.getElementById('btn-start-ar'), { childList: true, subtree: true, characterData: true });
+  </script>
 </body>
 </html>

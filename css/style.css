@@ -17,7 +17,16 @@ html, body {
   position: fixed;
   top: 0; left: 0;
   width: 100%; height: 100%;
-  pointer-events: none;
+  pointer-events: none;          /* AR / idle: pass-through */
+}
+
+/* Desktop mode: canvas must receive mouse events */
+body.desktop-mode #xr-canvas {
+  pointer-events: auto;
+  cursor: default;
+}
+body.desktop-mode #xr-canvas:active {
+  cursor: grabbing;
 }
 
 /* ── Landing screen ──────────────────────────────────────────────────────── */
@@ -261,4 +270,54 @@ html, body {
   0%   { opacity: 1; transform: translateY(0) scale(1); }
   60%  { opacity: 1; transform: translateY(-80px) scale(1.2); }
   100% { opacity: 0; transform: translateY(-160px) scale(0.8); }
+}
+
+/* ── Desktop / mobile 3D: crosshair ──────────────────────────────────────── */
+body.desktop-mode::after {
+  content: '+';
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: rgba(255,255,255,0.25);
+  font-size: 1.4rem;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 60;
+}
+
+/* ── Desktop hint row ────────────────────────────────────────────────────── */
+.hint-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 16px;
+  margin-top: 4px;
+}
+
+.hint-row span {
+  font-size: 0.78rem;
+  color: rgba(255,255,255,0.45);
+  background: rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+/* ── AR prompt tweaks for desktop ────────────────────────────────────────── */
+/* Give the prompt a slightly wider card feel on desktop */
+@media (min-width: 768px) and (pointer: fine) {
+  #ar-prompt {
+    gap: 20px;
+  }
+  #btn-start-ar {
+    padding: 20px 64px;
+    font-size: 1.3rem;
+  }
+}
+
+/* ── HUD: tighter on desktop (no need for huge touch targets) ────────────── */
+@media (pointer: fine) {
+  .emoji-btn { font-size: 1.3rem; }
+  #emoji-bar { padding: 8px 14px; gap: 6px; }
+  #object-bar { padding: 6px 12px; }
 }
