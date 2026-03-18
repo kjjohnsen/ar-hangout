@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AR Hangout</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- Landing / Room Entry UI -->
+  <div id="landing">
+    <div id="landing-card">
+      <h1>AR Hangout</h1>
+      <p>Share a room code to meet in AR together</p>
+      <input id="room-input" type="text" maxlength="6" placeholder="Room code (e.g. SUNNY)" autocomplete="off" />
+      <div id="landing-buttons">
+        <button id="btn-create">Create Room</button>
+        <button id="btn-join">Join Room</button>
+      </div>
+      <p id="landing-status"></p>
+    </div>
+  </div>
+
+  <!-- In-session HUD (shown during XR) -->
+  <div id="hud" class="hidden">
+    <div id="hud-top">
+      <span id="hud-room">Room: —</span>
+      <span id="hud-peers">0 others</span>
+    </div>
+
+    <!-- Emoji reaction bar -->
+    <div id="emoji-bar">
+      <button class="emoji-btn" data-emoji="👋">👋</button>
+      <button class="emoji-btn" data-emoji="❤️">❤️</button>
+      <button class="emoji-btn" data-emoji="😄">😄</button>
+      <button class="emoji-btn" data-emoji="🎉">🎉</button>
+      <button class="emoji-btn" data-emoji="👍">👍</button>
+    </div>
+
+    <!-- Object spawn toolbar -->
+    <div id="object-bar">
+      <button class="obj-btn" data-shape="cube" title="Spawn Cube">&#9632;</button>
+      <button class="obj-btn" data-shape="sphere" title="Spawn Sphere">&#9679;</button>
+      <button class="obj-btn" data-shape="torus" title="Spawn Torus">&#9711;</button>
+    </div>
+
+    <button id="btn-exit-xr">Exit AR</button>
+  </div>
+
+  <!-- Floating emoji container (DOM overlays) -->
+  <div id="emoji-floats"></div>
+
+  <!-- Three.js canvas target -->
+  <canvas id="xr-canvas"></canvas>
+
+  <!-- Start AR button (shown after room is ready) -->
+  <div id="ar-prompt" class="hidden">
+    <button id="btn-start-ar">Enter AR</button>
+    <p id="ar-status"></p>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
