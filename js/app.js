@@ -22,6 +22,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Network }        from './network.js';
 import { LocalAvatar, RemoteAvatar } from './avatar.js';
 import { SharedObjects }  from './objects.js';
+import { dbg, dbgWarn, dbgError } from './debug.js';
 
 // ── Modes ─────────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,9 @@ let sharedObjects  = null;
 const remoteAvatars = new Map(); // peerId → RemoteAvatar
 const localName = `Guest${Math.floor(Math.random() * 1000)}`;
 
+// Cached avatar state for late-joiner sync
+let _lastSentState = null;
+
 // Desktop drag state
 const _mouse     = new THREE.Vector2();
 const _raycaster = new THREE.Raycaster();
@@ -113,18 +117,40 @@ function initNetwork(roomCode) {
   network = new Network({
     roomCode,
     onPeer: peerId => {
+      dbg('APP', `peer joined: ${peerId}`);
       remoteAvatars.set(peerId, new RemoteAvatar(peerId, scene));
       updatePeerCount();
+
+      // Send our latest avatar state immediately so newcomer sees us
+      if (_lastSentState) {
+        dbg('APP', `sending cached avatar state to ${peerId}`);
+        network.sendTo(peerId, { type: 'state', payload: _lastSentState });
+      }
+
       // Host syncs existing objects to the newcomer
       if (network.isHost) {
-        sharedObjects?.getAllDefs().forEach(def =>
+        const defs = sharedObjects?.getAllDefs() ?? [];
+        dbg('APP', `syncing ${defs.length} objects to ${peerId}`);
+        defs.forEach(def =>
           network.sendTo(peerId, { type: 'obj-spawn', payload: def })
         );
       }
     },
     onPeerLeave: peerId => {
+      dbg('APP', `peer left: ${peerId}`);
       remoteAvatars.get(peerId)?.dispose();
       remoteAvatars.delete(peerId);
+
+      // Release any objects owned by the departed peer
+      if (sharedObjects) {
+        for (const [id, obj] of sharedObjects.objects) {
+          if (obj.owner === peerId) {
+            obj.owner = null;
+            dbg('APP', `released orphaned object ${id} from ${peerId}`);
+          }
+        }
+      }
+
       updatePeerCount();
     },
     onMessage: (peerId, msg) => handleMessage(peerId, msg),
@@ -132,14 +158,42 @@ function initNetwork(roomCode) {
 }
 
 function handleMessage(peerId, msg) {
+  // Log non-spammy messages
+  if (msg.type !== 'state' && msg.type !== 'obj-state') {
+    dbg('APP', `msg from ${peerId}: ${msg.type}`);
+  }
+
   switch (msg.type) {
-    case 'state':      remoteAvatars.get(peerId)?.applyState(msg.payload);          break;
-    case 'emoji':      remoteAvatars.get(msg.payload.peerId)?.showEmoji(msg.payload.emoji); break;
-    case 'obj-spawn':  sharedObjects?.applyRemoteSpawn(msg.payload);                break;
-    case 'obj-grab':   sharedObjects?.applyRemoteGrab(msg.payload);                 break;
-    case 'obj-state':  sharedObjects?.applyRemoteState(msg.payload);                break;
-    case 'obj-release':sharedObjects?.applyRemoteRelease(msg.payload);              break;
-    case 'obj-delete': sharedObjects?.applyRemoteDelete(msg.payload);               break;
+    case 'state':
+      remoteAvatars.get(peerId)?.applyState(msg.payload);
+      break;
+    case 'emoji':
+      remoteAvatars.get(msg.payload.peerId)?.showEmoji(msg.payload.emoji);
+      break;
+    case 'obj-spawn':
+      sharedObjects?.applyRemoteSpawn(msg.payload);
+      break;
+    case 'obj-grab':
+      sharedObjects?.applyRemoteGrab(msg.payload);
+      break;
+    case 'obj-state':
+      sharedObjects?.applyRemoteState(msg.payload);
+      break;
+    case 'obj-release':
+      sharedObjects?.applyRemoteRelease(msg.payload);
+      break;
+    case 'obj-delete':
+      sharedObjects?.applyRemoteDelete(msg.payload);
+      break;
+
+    // Full resync: a peer re-entered the scene and wants current state
+    case 'full-sync-request': {
+      dbg('APP', `full sync requested by ${peerId}`);
+      const defs = sharedObjects?.getAllDefs() ?? [];
+      defs.forEach(def => network.sendTo(peerId, { type: 'obj-spawn', payload: def }));
+      if (_lastSentState) network.sendTo(peerId, { type: 'state', payload: _lastSentState });
+      break;
+    }
   }
 }
 
@@ -151,6 +205,7 @@ function updatePeerCount() {
 // ── AR mode ───────────────────────────────────────────────────────────────────
 
 async function startAR() {
+  dbg('APP', 'entering AR mode');
   arStatus.textContent = 'Starting AR…';
   try {
     xrSession = await navigator.xr.requestSession('immersive-ar', {
@@ -159,6 +214,7 @@ async function startAR() {
       domOverlay: { root: document.body },
     });
   } catch (e) {
+    dbgError('APP', 'AR session failed:', e.message);
     arStatus.textContent = `AR failed: ${e.message}`;
     return;
   }
@@ -172,7 +228,12 @@ async function startAR() {
   hud.classList.remove('hidden');
   btnExit.textContent = 'Exit AR';
 
+  // Request full state sync from peers on (re-)entry
+  network?.broadcast({ type: 'full-sync-request', payload: {} });
+  dbg('APP', 'requested full sync from peers');
+
   xrSession.addEventListener('end', () => {
+    dbg('APP', 'XR session ended');
     currentMode = MODE.NONE;
     renderer.setAnimationLoop(null);
     xrSession = null;
@@ -190,6 +251,7 @@ function onARFrame(_time, frame) {
 
   // Broadcast local XR pose
   const state = localAvatar.getState(frame, refSpace, inputSources);
+  _lastSentState = state;
   network?.sendState(state);
 
   // B button → delete
@@ -249,6 +311,7 @@ function buildDesktopEnvironment() {
 }
 
 function startDesktop() {
+  dbg('APP', 'entering Desktop mode');
   currentMode = MODE.DESKTOP;
   document.body.classList.add('desktop-mode');
 
@@ -280,6 +343,10 @@ function startDesktop() {
   hud.classList.remove('hidden');
   btnExit.textContent = 'Exit';
 
+  // Request full state sync from peers on (re-)entry
+  network?.broadcast({ type: 'full-sync-request', payload: {} });
+  dbg('APP', 'requested full sync from peers');
+
   renderer.setAnimationLoop(onDesktopFrame);
 }
 
@@ -288,16 +355,19 @@ function onDesktopFrame() {
 
   // Broadcast local camera pose as avatar head state
   const p = camera.position, q = camera.quaternion;
-  network?.sendState({
+  const state = {
     name: localName,
     head: { p: [p.x, p.y, p.z], q: [q.x, q.y, q.z, q.w] },
     hands: { left: null, right: null },
-  });
+  };
+  _lastSentState = state;
+  network?.sendState(state);
 
   renderer.render(scene, camera);
 }
 
 function stopDesktop() {
+  dbg('APP', 'exiting Desktop mode');
   renderer.setAnimationLoop(null);
   orbitControls?.dispose();
   orbitControls = null;
@@ -340,9 +410,11 @@ function onMouseDown(e) {
   const obj = sharedObjects.objects.get(id);
   if (obj.owner && obj.owner !== network.localId) return; // someone else owns it
 
+  dbg('APP', `desktop grab: ${id}`);
   _dragId     = id;
   obj.owner   = network.localId;
-  network.broadcast({ type: 'obj-grab', payload: { id, owner: network.localId } });
+  obj.grabTs  = Date.now();
+  network.broadcast({ type: 'obj-grab', payload: { id, owner: network.localId, ts: obj.grabTs } });
 
   // Drag plane: perpendicular to camera through the object centre
   const normal = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -383,6 +455,7 @@ function onMouseMove(e) {
 
 function onMouseUp() {
   if (!_dragId) return;
+  dbg('APP', `desktop release: ${_dragId}`);
   const obj = sharedObjects?.objects.get(_dragId);
   if (obj) {
     obj.owner = null;
@@ -403,6 +476,7 @@ function onKeyDown(e) {
   const hits = _raycaster.intersectObjects(objectMeshes());
   if (!hits.length) return;
   const id = hits[0].object.userData.objId;
+  dbg('APP', `desktop delete: ${id}`);
   sharedObjects.applyRemoteDelete({ id });
   network.broadcast({ type: 'obj-delete', payload: { id } });
 }
@@ -428,17 +502,21 @@ function setupLandingUI() {
 }
 
 async function joinRoom(code) {
+  dbg('APP', `joining room: ${code}`);
   landingStatus.textContent = 'Connecting…';
   try {
     await loadPeerJS();
     initNetwork(code);
     await network.connect();
 
+    dbg('APP', `joined as ${network.localId} (${network.isHost ? 'HOST' : 'GUEST'})`);
+
     sharedObjects = new SharedObjects(scene, network, network.localId);
     hudRoom.textContent = `Room: ${code}`;
 
     // Detect best mode and configure the start button
     const arOk = !!navigator.xr && await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+    dbg('APP', `AR supported: ${arOk}`);
 
     landing.classList.add('hidden');
     arPrompt.classList.remove('hidden');
@@ -457,6 +535,7 @@ async function joinRoom(code) {
     btnStart.disabled = false;
 
   } catch (e) {
+    dbgError('APP', 'joinRoom failed:', e.message);
     landingStatus.textContent = `Error: ${e.message}`;
   }
 }
@@ -523,6 +602,7 @@ function main() {
   localAvatar = new LocalAvatar(localName);
   setupLandingUI();
   setupHudUI();
+  dbg('APP', `initialized, local name: ${localName}`);
 }
 
 main();

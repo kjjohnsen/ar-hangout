@@ -20,6 +20,7 @@
  */
 
 import * as THREE from 'three';
+import { dbg } from './debug.js';
 
 // Hand joint indices (XRHand spec order)
 const JOINT_NAMES = [
@@ -86,7 +87,9 @@ export class RemoteAvatar {
     this.peerId = peerId;
     this.scene  = scene;
     this.color  = nextColor();
+    this._receivedFirstState = false;
     this.root   = new THREE.Group();
+    dbg('AVATAR', `created remote avatar for ${peerId}`);
     scene.add(this.root);
 
     // Head
@@ -177,6 +180,10 @@ export class RemoteAvatar {
 
   applyState(state) {
     if (!state) return;
+    if (!this._receivedFirstState) {
+      dbg('AVATAR', `first state received from ${this.peerId}`);
+      this._receivedFirstState = true;
+    }
 
     // Head
     if (state.head) {
@@ -241,6 +248,7 @@ export class RemoteAvatar {
   }
 
   dispose() {
+    dbg('AVATAR', `disposed avatar for ${this.peerId}`);
     this.scene.remove(this.root);
     if (this._emojiTimer) clearTimeout(this._emojiTimer);
   }

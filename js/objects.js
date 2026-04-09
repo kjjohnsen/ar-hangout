@@ -1,29 +1,31 @@
 /**
  * objects.js — Shared grabbable AR objects
  *
- * Objects are spawned 0.5 m in front of the user's head and are
+ * Objects are spawned in front of the user's head and are
  * identified by a UUID so they can be synced across peers.
  *
  * Grabbing uses ray-cast (pointer mode) OR proximity grab (hand tracking):
  *  - Controller: trigger button on the hand closest to the object while
  *                the controller ray intersects the object.
- *  - Hand: pinch gesture (index-tip ↔ thumb-tip distance < PINCH_THRESHOLD)
+ *  - Hand: pinch gesture (index-tip <-> thumb-tip distance < PINCH_THRESHOLD)
  *           while near the object.
  *
  * Ownership: only one peer can move an object at a time.
- *  - obj-grab   { id, owner }  → locks the object
- *  - obj-state  { id, p, q }   → streaming position while grabbed
- *  - obj-release{ id, p, q }   → final position + unlocks
- *  - obj-delete { id }         → removes object entirely
+ *  - obj-grab   { id, owner, ts }  -> locks the object (ts for race resolution)
+ *  - obj-state  { id, p, q }       -> streaming position while grabbed (throttled)
+ *  - obj-release{ id, p, q }       -> final position + unlocks
+ *  - obj-delete { id }             -> removes object entirely
  */
 
 import * as THREE from 'three';
+import { dbg, dbgWarn } from './debug.js';
 
 const PINCH_THRESHOLD = 0.025; // metres
+const OBJ_BROADCAST_INTERVAL = 50; // ms (~20fps for object state)
 
 let _uidCounter = 0;
-function uid() {
-  return `obj-${Date.now()}-${_uidCounter++}`;
+function uid(peerId) {
+  return `obj-${peerId}-${Date.now()}-${_uidCounter++}`;
 }
 
 const SHAPE_FACTORIES = {
@@ -45,19 +47,22 @@ export class SharedObjects {
     this.scene       = scene;
     this.network     = network;
     this.localPeerId = localPeerId;
-    this.objects     = new Map(); // id → { mesh, owner, id }
+    this.objects     = new Map(); // id -> { mesh, owner, id, grabTs }
 
     this._heldLeft   = null; // id of object held in left hand
     this._heldRight  = null;
 
     // Raycaster for controller grab
     this._raycaster  = new THREE.Raycaster();
+
+    // Throttle for object state broadcasts
+    this._lastObjBroadcast = 0;
   }
 
   // ── Spawning ──────────────────────────────────────────────────────────────
 
   spawnAt(shape, position, quaternion) {
-    const id    = uid();
+    const id    = uid(this.localPeerId);
     const color = OBJECT_COLORS[_colorIdx++ % OBJECT_COLORS.length];
     const def   = {
       id, shape, color,
@@ -66,10 +71,14 @@ export class SharedObjects {
     };
     this._addObject(def);
     this.network.broadcast({ type: 'obj-spawn', payload: def });
+    dbg('OBJ', `spawn ${shape} id=${id}`);
   }
 
   applyRemoteSpawn(def) {
-    if (!this.objects.has(def.id)) this._addObject(def);
+    if (!this.objects.has(def.id)) {
+      this._addObject(def);
+      dbg('OBJ', `remote spawn ${def.shape} id=${def.id}`);
+    }
   }
 
   _addObject({ id, shape, color, p, q }) {
@@ -80,15 +89,28 @@ export class SharedObjects {
     mesh.quaternion.fromArray(q);
     mesh.castShadow = true;
     mesh.userData.objId = id;
+    mesh.userData.shape = shape;  // store shape for reliable getAllDefs()
     this.scene.add(mesh);
-    this.objects.set(id, { mesh, owner: null, id });
+    this.objects.set(id, { mesh, owner: null, id, grabTs: 0 });
   }
 
   // ── Remote state updates ──────────────────────────────────────────────────
 
   applyRemoteGrab(payload) {
     const obj = this.objects.get(payload.id);
-    if (obj) obj.owner = payload.owner;
+    if (!obj) return;
+
+    const incomingTs = payload.ts || 0;
+
+    // Resolve simultaneous grab race: if we own it and our grab is newer, reject
+    if (obj.owner === this.localPeerId && (obj.grabTs || 0) > incomingTs) {
+      dbg('OBJ', `rejected stale grab on ${payload.id} from ${payload.owner} (our ts=${obj.grabTs} > ${incomingTs})`);
+      return;
+    }
+
+    dbg('OBJ', `remote grab ${payload.id} by ${payload.owner}`);
+    obj.owner  = payload.owner;
+    obj.grabTs = incomingTs;
   }
 
   applyRemoteState(payload) {
@@ -101,6 +123,7 @@ export class SharedObjects {
   applyRemoteRelease(payload) {
     const obj = this.objects.get(payload.id);
     if (!obj) return;
+    dbg('OBJ', `remote release ${payload.id}`);
     obj.owner = null;
     obj.mesh.position.fromArray(payload.p);
     obj.mesh.quaternion.fromArray(payload.q);
@@ -109,6 +132,7 @@ export class SharedObjects {
   applyRemoteDelete(payload) {
     const obj = this.objects.get(payload.id);
     if (!obj) return;
+    dbg('OBJ', `delete ${payload.id}`);
     this.scene.remove(obj.mesh);
     this.objects.delete(payload.id);
   }
@@ -134,22 +158,23 @@ export class SharedObjects {
         this._handleControllerGrab(frame, refSpace, src, side, heldId);
       }
 
-      // If holding, stream the object's current position
+      // If holding, stream the object's current position (throttled)
       const currentHeld = side === 'left' ? this._heldLeft : this._heldRight;
       if (currentHeld) {
-        const obj = this.objects.get(currentHeld);
-        if (obj) {
-          this.network.sendState({
-            // We repurpose sendState for objects too; app.js will wrap them separately
-          });
-          this.network.broadcast({
-            type: 'obj-state',
-            payload: {
-              id: obj.id,
-              p: obj.mesh.position.toArray(),
-              q: obj.mesh.quaternion.toArray(),
-            },
-          });
+        const now = performance.now();
+        if (now - this._lastObjBroadcast > OBJ_BROADCAST_INTERVAL) {
+          this._lastObjBroadcast = now;
+          const obj = this.objects.get(currentHeld);
+          if (obj) {
+            this.network.broadcast({
+              type: 'obj-state',
+              payload: {
+                id: obj.id,
+                p: obj.mesh.position.toArray(),
+                q: obj.mesh.quaternion.toArray(),
+              },
+            });
+          }
         }
       }
     }
@@ -233,10 +258,13 @@ export class SharedObjects {
   _grab(id, side, _point) {
     const obj = this.objects.get(id);
     if (!obj) return;
-    obj.owner = this.localPeerId;
+    const ts = Date.now();
+    obj.owner  = this.localPeerId;
+    obj.grabTs = ts;
     if (side === 'left') this._heldLeft = id;
     else this._heldRight = id;
-    this.network.broadcast({ type: 'obj-grab', payload: { id, owner: this.localPeerId } });
+    dbg('OBJ', `grab ${id} ts=${ts}`);
+    this.network.broadcast({ type: 'obj-grab', payload: { id, owner: this.localPeerId, ts } });
   }
 
   _release(id, side) {
@@ -244,6 +272,7 @@ export class SharedObjects {
     if (side === 'left') this._heldLeft = null;
     else this._heldRight = null;
     if (!obj) return;
+    dbg('OBJ', `release ${id}`);
     obj.owner = null;
     this.network.broadcast({
       type: 'obj-release',
@@ -280,8 +309,7 @@ export class SharedObjects {
   getAllDefs() {
     return [...this.objects.values()].map(({ mesh, id }) => ({
       id,
-      shape: mesh.geometry.type === 'BoxGeometry' ? 'cube'
-           : mesh.geometry.type === 'SphereGeometry' ? 'sphere' : 'torus',
+      shape: mesh.userData.shape || 'cube',
       color: mesh.material.color.getHex(),
       p: mesh.position.toArray(),
       q: mesh.quaternion.toArray(),
